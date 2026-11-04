@@ -302,6 +302,8 @@ class ValidationWorker(QThread):
         self.output_dir = output_dir
         self.max_workers = max_workers
         self.stop_event = threading.Event()
+        self.pause_event = threading.Event()
+        self.pause_event.set()  # Initially running
 
     def stop(self):
         self.stop_event.set()
@@ -341,6 +343,13 @@ class ValidationWorker(QThread):
                     }
 
                     for future in as_completed(futures):
+                        while not self.pause_event.is_set():
+                            if self.stop_event.is_set():
+                                break
+                            time.sleep(0.2)
+
+                        if self.stop_event.is_set():
+                            break
                         if self.stop_event.is_set():
                             # Cancel tasks that have not started. Running SMTP
                             # requests finish or time out before the thread exits.
@@ -396,6 +405,12 @@ class ValidationWorker(QThread):
 
         except Exception as exc:
             self.failed.emit(str(exc))
+
+    def toggle_pause(self):
+        if self.pause_event.is_set():
+            self.pause_event.clear()
+        else:
+            self.pause_event.set()
 
 
 # -------------------- GUI --------------------
@@ -710,7 +725,12 @@ class EmailValidatorWindow(QMainWindow):
         action_row = QHBoxLayout()
         self.start_button = QPushButton("▶  Start validation")
         self.start_button.setObjectName("primaryButton")
-        self.start_button.clicked.connect(self.start_validation)
+        self.start_button.clicked.connect(self.handle_start_pause)
+
+        # self.pause_button = QPushButton("⏸ Pause")
+        # self.pause_button.setEnabled(False)
+        # self.pause_button.clicked.connect(self.toggle_pause)
+        # settings_layout.addWidget(self.pause_button)
 
         self.stop_button = QPushButton("■  Stop")
         self.stop_button.setObjectName("stopButton")
@@ -892,7 +912,7 @@ class EmailValidatorWindow(QMainWindow):
             "border-radius:12px; padding:9px 14px; font-weight:700;"
         )
 
-        self.start_button.setEnabled(False)
+        self.start_button.setEnabled(True)
         self.stop_button.setEnabled(True)
         self.workers_spin.setEnabled(False)
 
@@ -908,6 +928,13 @@ class EmailValidatorWindow(QMainWindow):
         self.worker.failed.connect(self.on_failed)
         self.worker.start()
 
+        self.start_button.setEnabled(True)
+        self.start_button.setText("⏸  Pause")
+        self.stop_button.setEnabled(True)
+
+        self.start_button.setEnabled(True)
+        self.stop_button.setEnabled(True)
+
     def stop_validation(self):
         if self.worker and self.worker.isRunning():
             self.worker.stop()
@@ -915,6 +942,11 @@ class EmailValidatorWindow(QMainWindow):
             self.progress_label.setText("Stopping after current network requests…")
             self.status_badge.setText("●  STOPPING")
             self.append_log("Stop requested.")
+
+            # self.pause_button.setEnabled(False)
+            # self.pause_button.setText("⏸  Pause")
+            self.start_button.setEnabled(True)
+            self.stop_button.setEnabled(False)
 
     def on_progress(self, completed, total, email, status):
         self.total_emails = total
@@ -968,6 +1000,10 @@ class EmailValidatorWindow(QMainWindow):
             f"Output folder:\n{self.output_dir}",
         )
 
+        self.start_button.setEnabled(True)
+        self.start_button.setText("▶  Start validation")
+        self.stop_button.setEnabled(False)
+
     def on_failed(self, message):
         self.append_log(f"ERROR: {message}")
         self.progress_label.setText("Validation error — see activity log.")
@@ -1001,6 +1037,23 @@ class EmailValidatorWindow(QMainWindow):
                 event.ignore()
         else:
             event.accept()
+
+    def toggle_pause(self):
+        self.worker.toggle_pause()
+
+        if self.worker.pause_event.is_set():
+            self.start_button.setText("⏸  Pause")
+            self.append_log("Validation resumed.")
+        else:
+            self.start_button.setText("▶  Resume")
+            self.append_log("Validation paused.")
+
+    def handle_start_pause(self):
+        if not self.worker or not self.worker.isRunning():
+            self.start_validation()
+            return
+
+        self.toggle_pause()
 
 
 def main():
