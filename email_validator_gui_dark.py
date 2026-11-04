@@ -38,6 +38,7 @@ SENDER_EMAIL = "verify@example.com"
 
 VALID_OUTPUT = "verified_emails.csv"
 INVALID_OUTPUT = "rejected_emails.csv"
+UNKNOWN_OUTPUT = "unknown_emails.csv"
 
 FIELDS = ["email", "syntax", "mx", "smtp", "catch_all", "status"]
 
@@ -321,6 +322,7 @@ class ValidationWorker(QThread):
 
             valid_path = f"{self.output_dir}/{VALID_OUTPUT}"
             invalid_path = f"{self.output_dir}/{INVALID_OUTPUT}"
+            unknown_path = f"{self.output_dir}/{UNKNOWN_OUTPUT}"
 
             valid_count = 0
             invalid_count = 0
@@ -331,12 +333,15 @@ class ValidationWorker(QThread):
             self.log.emit(f"Starting {self.max_workers} worker threads.")
 
             with open(valid_path, "w", newline="", encoding="utf-8") as valid_file, \
-                 open(invalid_path, "w", newline="", encoding="utf-8") as invalid_file:
+                 open(invalid_path, "w", newline="", encoding="utf-8") as invalid_file, \
+                 open(unknown_path, "w", newline="", encoding="utf-8") as unknown_file:
 
                 valid_writer = csv.DictWriter(valid_file, fieldnames=FIELDS)
                 invalid_writer = csv.DictWriter(invalid_file, fieldnames=FIELDS)
+                unknown_writer = csv.DictWriter(unknown_file, fieldnames=FIELDS)
                 valid_writer.writeheader()
                 invalid_writer.writeheader()
+                unknown_writer.writeheader()
 
                 with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
 
@@ -407,7 +412,9 @@ class ValidationWorker(QThread):
                                 invalid_file.flush()
 
                             else:
+                                unknown_writer.writerow(result)
                                 unknown_count += 1
+                                unknown_file.flush()
 
                             self.counts_updated.emit(
                                 valid_count,
@@ -891,7 +898,7 @@ class EmailValidatorWindow(QMainWindow):
         note = QLabel(
             "Note: SMTP validation is best-effort and cannot conclusively confirm mailbox existence. "
             "Server policies, throttling, and network restrictions may produce UNKNOWN results. "
-            "Only VALID and INVALID results are saved; UNKNOWN results are omitted from both CSV files. "
+            "VALID, INVALID, and UNKNOWN results are saved separately in their respective CSV files. "
             "Validate only addresses you are authorized to check and respect recipient-server policies."
         )
         note.setObjectName("muted")
