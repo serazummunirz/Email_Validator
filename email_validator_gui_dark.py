@@ -8,7 +8,7 @@ import socket
 import socks
 import smtplib
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
 import dns.resolver
 import dns.exception
@@ -21,7 +21,9 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox, QMessageBox,
     QFrame, QGridLayout, QDialog, QComboBox, QDialogButtonBox, QCheckBox
 )
-
+from PyQt5.QtGui import (
+    QIcon, QPixmap, QPainter, QColor, QPen, QBrush
+)
 
 # -------------------- CONFIGURATION --------------------
 
@@ -337,66 +339,88 @@ class ValidationWorker(QThread):
                 invalid_writer.writeheader()
 
                 with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+
                     futures = {
-                        executor.submit(verify_email, email, self.stop_event): email
+                        executor.submit(
+                            verify_email,
+                            email,
+                            self.stop_event,
+                            # self.proxy_config
+                        ): email
                         for email in emails
                     }
 
-                    for future in as_completed(futures):
-                        while not self.pause_event.is_set():
-                            if self.stop_event.is_set():
-                                break
-                            time.sleep(0.2)
+                    pending = set(futures)
 
+                    while pending:
+
+                        # Cancel tasks that haven't started when Stop is requested
                         if self.stop_event.is_set():
-                            break
-                        if self.stop_event.is_set():
-                            # Cancel tasks that have not started. Running SMTP
-                            # requests finish or time out before the thread exits.
-                            for pending in futures:
-                                pending.cancel()
+                            for future in pending:
+                                future.cancel()
 
-                        email = futures[future]
-                        completed += 1
-
-                        if future.cancelled():
-                            continue
-
-                        try:
-                            result = future.result()
-                        except Exception as exc:
-                            result = {
-                                "email": email,
-                                "syntax": "UNKNOWN",
-                                "mx": "UNKNOWN",
-                                "smtp": "UNKNOWN",
-                                "catch_all": "UNKNOWN",
-                                "status": "UNKNOWN",
-                            }
-                            self.log.emit(f"Error checking {email}: {exc}")
-
-                        if result["status"] == "VALID":
-                            valid_writer.writerow(result)
-                            valid_count += 1
-                            valid_file.flush()
-                        elif result["status"] == "INVALID":
-                            invalid_writer.writerow(result)
-                            invalid_count += 1
-                            invalid_file.flush()
-                        else:
-                            unknown_count += 1
-
-                        # Update the GUI counters after every completed email.
-                        self.counts_updated.emit(
-                            valid_count, invalid_count, unknown_count
+                        # Wait briefly so Stop can be detected promptly
+                        done, pending = wait(
+                            pending,
+                            timeout=0.2,
+                            return_when=FIRST_COMPLETED
                         )
 
-                        self.progress.emit(
-                            completed,
-                            total,
-                            email,
-                            result["status"],
-                        )
+                        for future in done:
+
+                            # Ignore tasks successfully cancelled before execution
+                            if future.cancelled():
+                                continue
+
+                            # Respect Pause, but allow Stop to release the pause
+                            while not self.pause_event.is_set():
+                                if self.stop_event.is_set():
+                                    break
+                                time.sleep(0.2)
+
+                            email = futures[future]
+                            completed += 1
+
+                            try:
+                                result = future.result()
+
+                            except Exception as exc:
+                                result = {
+                                    "email": email,
+                                    "syntax": "UNKNOWN",
+                                    "mx": "UNKNOWN",
+                                    "smtp": "UNKNOWN",
+                                    "catch_all": "UNKNOWN",
+                                    "status": "UNKNOWN",
+                                }
+
+                                self.log.emit(f"Error checking {email}: {exc}")
+
+                            if result["status"] == "VALID":
+                                valid_writer.writerow(result)
+                                valid_count += 1
+                                valid_file.flush()
+
+                            elif result["status"] == "INVALID":
+                                invalid_writer.writerow(result)
+                                invalid_count += 1
+                                invalid_file.flush()
+
+                            else:
+                                unknown_count += 1
+
+                            self.counts_updated.emit(
+                                valid_count,
+                                invalid_count,
+                                unknown_count
+                            )
+
+                            self.progress.emit(
+                                completed,
+                                total,
+                                email,
+                                result["status"]
+                            )
 
             stopped = self.stop_event.is_set()
             self.finished_summary.emit(
@@ -411,6 +435,12 @@ class ValidationWorker(QThread):
             self.pause_event.clear()
         else:
             self.pause_event.set()
+
+    def request_stop(self):
+        self.stop_event.set()
+
+        # Release the worker if it is currently paused
+        self.pause_event.set()
 
 
 # -------------------- GUI --------------------
@@ -514,12 +544,49 @@ class ProxyDialog(QDialog):
         self.accept()
 
 
+def create_app_icon():
+    pixmap = QPixmap(64, 64)
+    pixmap.fill(QColor(0, 0, 0, 0))
+
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+
+    # Teal background
+    painter.setBrush(QColor(23, 107, 87))
+    painter.setPen(Qt.NoPen)
+    painter.drawRoundedRect(2, 2, 60, 60, 14, 14)
+
+    # White envelope
+    painter.setPen(QPen(Qt.white, 3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    painter.setBrush(Qt.NoBrush)
+
+    painter.drawRoundedRect(12, 18, 40, 29, 4, 4)
+    painter.drawLine(13, 20, 32, 35)
+    painter.drawLine(51, 20, 32, 35)
+
+    # Green verification badge
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor(80, 200, 120))
+    painter.drawEllipse(39, 39, 20, 20)
+
+    # White checkmark
+    painter.setPen(QPen(Qt.white, 2.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    painter.drawLine(44, 49, 48, 53)
+    painter.drawLine(48, 53, 55, 45)
+
+    painter.end()
+
+    return QIcon(pixmap)
+
+
 class EmailValidatorWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.setWindowIcon(create_app_icon())
         self.setWindowTitle("Email Validator | CPA")
         self.resize(1100, 900)
         self.setMinimumSize(1100, 900)
+        
 
         self.worker = None
         self.input_path = ""
@@ -937,7 +1004,7 @@ class EmailValidatorWindow(QMainWindow):
 
     def stop_validation(self):
         if self.worker and self.worker.isRunning():
-            self.worker.stop()
+            self.worker.request_stop()
             self.stop_button.setEnabled(False)
             self.progress_label.setText("Stopping after current network requests…")
             self.status_badge.setText("●  STOPPING")
