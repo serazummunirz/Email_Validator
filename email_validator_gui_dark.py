@@ -583,7 +583,7 @@ class EmailValidatorWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowIcon(create_app_icon())
-        self.setWindowTitle("Email Validator | CPA")
+        self.setWindowTitle("CPA Email Validator")
         self.resize(1100, 900)
         self.setMinimumSize(1100, 900)
         
@@ -699,9 +699,9 @@ class EmailValidatorWindow(QMainWindow):
         # Header
         header = QHBoxLayout()
         heading = QVBoxLayout()
-        eyebrow = QLabel("MAIL OPERATIONS / TOOLKIT")
+        eyebrow = QLabel("EMAIL VERIFICATION / WORKSPACE")
         eyebrow.setObjectName("eyebrow")
-        title = QLabel("Email Validator")
+        title = QLabel("CPA Email Validator")
         title.setObjectName("mainTitle")
         # subtitle = QLabel("A focused workspace for DNS/MX checks and best-effort SMTP validation.")
         # subtitle.setContentsMargins(0, 0, 0, 15)
@@ -845,7 +845,7 @@ class EmailValidatorWindow(QMainWindow):
         progress_layout.setContentsMargins(17, 14, 17, 15)
         progress_layout.setSpacing(10)
         progress_top = QHBoxLayout()
-        progress_heading = QLabel("VALIDATION PROGRESS")
+        progress_heading = QLabel("VALIDATION PROGRESS:")
         progress_heading.setObjectName("sectionTitle")
         self.percent_label = QLabel("0%")
         self.percent_label.setStyleSheet("color:#62daba; font-weight:750; font-size:14pt;")
@@ -869,13 +869,13 @@ class EmailValidatorWindow(QMainWindow):
 
         # Activity log
         log_header = QHBoxLayout()
-        log_title = QLabel("ACTIVITY LOG")
+        log_title = QLabel("ACTIVITY LOG:")
         log_title.setObjectName("sectionTitle")
-        log_hint = QLabel("Live validation events")
-        log_hint.setObjectName("muted")
+        # log_hint = QLabel("Live validation events")
+        # log_hint.setObjectName("muted")
         log_header.addWidget(log_title)
         log_header.addSpacing(8)
-        log_header.addWidget(log_hint)
+        # log_header.addWidget(log_hint)
         log_header.addStretch(1)
         clear_log = QPushButton("Clear log")
         clear_log.setObjectName("subtleButton")
@@ -889,9 +889,10 @@ class EmailValidatorWindow(QMainWindow):
         main_layout.addWidget(self.log_box, 1)
 
         note = QLabel(
-            "Note: SMTP checks are best-effort and cannot conclusively prove mailbox existence. "
+            "Note: SMTP validation is best-effort and cannot conclusively confirm mailbox existence. "
+            "Server policies, throttling, and network restrictions may produce UNKNOWN results. "
             "Only VALID and INVALID results are saved; UNKNOWN results are omitted from both CSV files. "
-            "Use only with addresses you are authorized to validate and respect recipient-server policies."
+            "Validate only addresses you are authorized to check and respect recipient-server policies."
         )
         note.setObjectName("muted")
         note.setWordWrap(True)
