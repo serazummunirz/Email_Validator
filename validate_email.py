@@ -10,13 +10,15 @@ import smtplib
 import dns.resolver
 import dns.exception
 import dns.name
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 INPUT_FILE = "emails.txt"
 OUTPUT_FILE = "verified_emails.csv"
 
 SENDER_EMAIL = "verify@example.com"
 SMTP_TIMEOUT = 10
-DELAY = 1
+DELAY = 0
+MAX_WORKERS = 5
 
 # DNS resolver
 resolver = dns.resolver.Resolver()
@@ -214,12 +216,16 @@ def load_emails(filename):
 
 
 
+
 def main():
     input_file = sys.argv[1] if len(sys.argv) > 1 else INPUT_FILE
 
     emails = load_emails(input_file)
 
-    print(f"Loaded {len(emails)} unique emails.\n")
+    total = len(emails)
+
+    print(f"Loaded {total} unique emails.")
+    print(f"Starting {MAX_WORKERS} workers...\n")
 
     fields = [
         "email",
@@ -230,45 +236,90 @@ def main():
         "status"
     ]
 
-    with open("verified_emails.csv", "w", newline="", encoding="utf-8") as valid_file, \
-         open("rejected_emails.csv", "w", newline="", encoding="utf-8") as invalid_file:
+    valid_count = 0
+    invalid_count = 0
+    unknown_count = 0
+    completed = 0
 
-        valid_writer = csv.DictWriter(valid_file, fieldnames=fields)
-        invalid_writer = csv.DictWriter(invalid_file, fieldnames=fields)
+    with open(
+        "verified_emails.csv",
+        "w",
+        newline="",
+        encoding="utf-8"
+    ) as valid_file, open(
+        "rejected_emails.csv",
+        "w",
+        newline="",
+        encoding="utf-8"
+    ) as invalid_file:
+
+        valid_writer = csv.DictWriter(
+            valid_file,
+            fieldnames=fields
+        )
+
+        invalid_writer = csv.DictWriter(
+            invalid_file,
+            fieldnames=fields
+        )
 
         valid_writer.writeheader()
         invalid_writer.writeheader()
 
-        valid_count = 0
-        invalid_count = 0
-        unknown_count = 0
+        with ThreadPoolExecutor(
+            max_workers=MAX_WORKERS
+        ) as executor:
 
-        for index, email in enumerate(emails, start=1):
+            futures = {
+                executor.submit(verify_email, email): email
+                for email in emails
+            }
 
-            result = verify_email(email)
+            for future in as_completed(futures):
 
-            if result["status"] == "VALID":
-                valid_writer.writerow(result)
-                valid_count += 1
-                valid_file.flush()
+                email = futures[future]
+                completed += 1
 
-            elif result["status"] == "INVALID":
-                invalid_writer.writerow(result)
-                invalid_count += 1
-                invalid_file.flush()
+                try:
+                    result = future.result()
 
-            else:
-                unknown_count += 1
+                except Exception as e:
+                    print(f"ERROR: {email} -> {e}")
 
-            print(
-                f"[{index}/{len(emails)}] "
-                f"{email} -> {result['status']}"
-            )
+                    result = {
+                        "email": email,
+                        "syntax": "UNKNOWN",
+                        "mx": "UNKNOWN",
+                        "smtp": "UNKNOWN",
+                        "catch_all": "UNKNOWN",
+                        "status": "UNKNOWN"
+                    }
 
-            time.sleep(DELAY)
+                if result["status"] == "VALID":
+
+                    valid_writer.writerow(result)
+                    valid_count += 1
+                    valid_file.flush()
+
+                elif result["status"] == "INVALID":
+
+                    invalid_writer.writerow(result)
+                    invalid_count += 1
+                    invalid_file.flush()
+
+                else:
+                    unknown_count += 1
+
+                print(
+                    f"[{completed}/{total}] "
+                    f"{email} -> {result['status']} "
+                    f"| Valid: {valid_count} "
+                    f"| Invalid: {invalid_count} "
+                    f"| Unknown: {unknown_count}"
+                )
 
     print("\n========== SUMMARY ==========")
-    print(f"Total:    {len(emails)}")
+    print(f"Total:    {total}")
     print(f"Valid:    {valid_count}")
     print(f"Invalid:  {invalid_count}")
     print(f"Unknown:  {unknown_count}")
