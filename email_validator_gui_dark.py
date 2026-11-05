@@ -43,7 +43,15 @@ VALID_OUTPUT = "verified_emails.csv"
 INVALID_OUTPUT = "rejected_emails.csv"
 UNKNOWN_OUTPUT = "unknown_emails.csv"
 
-FIELDS = ["email", "syntax", "mx", "smtp", "catch_all", "status"]
+FIELDS = [
+    "email",
+    "syntax",
+    "mx",
+    "smtp",
+    "catch_all",
+    "filter_status",
+    "status",
+]
 
 
 # -------------------- VALIDATION FUNCTIONS --------------------
@@ -192,8 +200,7 @@ def smtp_check(email, mx_records, stop_event=None, proxy=None):
     return "UNKNOWN"
 
 
-
-def verify_email(email, stop_event=None):
+def verify_email(email, stop_event=None, domain_filter_config=None):
     email = (email or "").strip().lower()
 
     result = {
@@ -202,15 +209,70 @@ def verify_email(email, stop_event=None):
         "mx": "UNKNOWN",
         "smtp": "UNKNOWN",
         "catch_all": "UNKNOWN",
+        "filter_status": "PASSED",
         "status": "UNKNOWN",
     }
 
-    if not valid_syntax(email):
+    config = domain_filter_config or {}
+
+    # --------------------------------------------------
+    # 1. SYNTAX CHECK
+    # --------------------------------------------------
+
+    syntax_valid = valid_syntax(email)
+
+    if syntax_valid:
+        result["syntax"] = "VALID"
+
+    # Strict syntax filtering
+    if config.get("syntax_enabled", False) and not syntax_valid:
+        result["status"] = "FILTERED"
+        result["filter_status"] = "SYNTAX"
+        return result
+
+    # A usable domain is required for DNS/MX validation.
+    if "@" not in email:
         result["status"] = "INVALID"
         return result
 
-    result["syntax"] = "VALID"
     domain = email.rsplit("@", 1)[1]
+
+    if not domain:
+        result["status"] = "INVALID"
+        return result
+
+    # --------------------------------------------------
+    # 2. DOMAIN FILTER
+    # --------------------------------------------------
+
+    if config.get("enabled", False):
+
+        mode = config.get("mode", "include")
+
+        filtered_domains = {
+            d.strip().lower().lstrip("@").rstrip(".")
+            for d in config.get("domains", [])
+            if d.strip()
+        }
+
+        domain_matches = domain in filtered_domains
+
+        if mode == "include" and not domain_matches:
+            result["status"] = "FILTERED"
+            result["filter_status"] = "DOMAIN"
+            return result
+
+        if mode == "exclude" and domain_matches:
+            result["status"] = "FILTERED"
+            result["filter_status"] = "DOMAIN"
+            return result
+
+    # --------------------------------------------------
+    # 3. DNS / MX VALIDATION
+    # --------------------------------------------------
+
+    if stop_event and stop_event.is_set():
+        return result
 
     mx_records = get_mx_records(domain)
 
@@ -220,6 +282,13 @@ def verify_email(email, stop_event=None):
         return result
 
     result["mx"] = "VALID"
+
+    # --------------------------------------------------
+    # 4. SMTP VALIDATION
+    # --------------------------------------------------
+
+    if stop_event and stop_event.is_set():
+        return result
 
     smtp_result = smtp_check(email, mx_records, stop_event)
     result["smtp"] = smtp_result
@@ -231,8 +300,10 @@ def verify_email(email, stop_event=None):
     if smtp_result != "ACCEPTED":
         return result
 
-    # Catch-all detection uses one random recipient probe.
-    # Some providers accept or defer all probes, so this remains indicative.
+    # --------------------------------------------------
+    # 5. CATCH-ALL DETECTION
+    # --------------------------------------------------
+
     if stop_event and stop_event.is_set():
         return result
 
@@ -242,6 +313,7 @@ def verify_email(email, stop_event=None):
     if catch_result == "ACCEPTED":
         result["catch_all"] = "YES"
         result["status"] = "UNKNOWN"
+
     elif catch_result == "REJECTED":
         result["catch_all"] = "NO"
         result["status"] = "VALID"
@@ -295,6 +367,7 @@ def load_emails(filename):
 # -------------------- BACKGROUND WORKER --------------------
 
 
+
 class DomainFilterDialog(QDialog):
     def __init__(self, config=None, parent=None):
         super().__init__(parent)
@@ -320,7 +393,18 @@ class DomainFilterDialog(QDialog):
         self.enabled_checkbox.setMinimumHeight(48)
         self.enabled_checkbox.setCursor(Qt.PointingHandCursor)
 
-        self.enabled_checkbox.setStyleSheet("""
+        # Strict syntax filtering checkbox
+        self.syntax_checkbox = QCheckBox(
+            "Enable strict syntax filtering"
+        )
+
+        self.syntax_checkbox.setChecked(
+            config.get("syntax_enabled", False)
+        )
+
+        self.syntax_checkbox.setCursor(Qt.PointingHandCursor)
+
+        checkbox_style = """
             QCheckBox {
                 color: #d8e4df;
                 spacing: 9px;
@@ -345,7 +429,10 @@ class DomainFilterDialog(QDialog):
                 background-color: #176b57;
                 border: 1px solid #21866c;
             }
-        """)
+        """
+
+        self.enabled_checkbox.setStyleSheet(checkbox_style)
+        self.syntax_checkbox.setStyleSheet(checkbox_style)
 
         layout.addWidget(self.enabled_checkbox)
 
@@ -387,6 +474,9 @@ class DomainFilterDialog(QDialog):
         self.domains_edit.setMinimumHeight(180)
         layout.addWidget(self.domains_edit)
 
+        # Strict syntax filtering option
+        layout.addWidget(self.syntax_checkbox)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.Save |
             QDialogButtonBox.Cancel
@@ -411,7 +501,7 @@ class DomainFilterDialog(QDialog):
         if self.enabled_checkbox.isChecked() and not domains:
             QMessageBox.warning(
                 self,
-                "Domain Filter",
+                "",
                 "Please enter at least one domain."
             )
             return
@@ -429,6 +519,7 @@ class DomainFilterDialog(QDialog):
             "enabled": self.enabled_checkbox.isChecked(),
             "mode": self.mode_combo.currentData(),
             "domains": domains,
+            "syntax_enabled": self.syntax_checkbox.isChecked(),
         }
 
         self.accept()
@@ -447,11 +538,15 @@ class ValidationWorker(QThread):
         # self.input_path.setMinimumHeight(38)
         self.output_dir = output_dir
         self.max_workers = max_workers
-        self.domain_filter_config = domain_filter_config or {
+        self.domain_filter_config = {
             "enabled": False,
             "mode": "include",
             "domains": [],
+            "syntax_enabled": False,
         }
+
+        if domain_filter_config is not None:
+            self.domain_filter_config.update(domain_filter_config)
         self.stop_event = threading.Event()
         self.pause_event = threading.Event()
         self.pause_event.set()  # Initially running
@@ -474,32 +569,8 @@ class ValidationWorker(QThread):
 
             config = self.domain_filter_config
 
-            if config["enabled"]:
-                allowed_domains = set(config["domains"])
-                mode = config["mode"]
-
-                for email in all_emails:
-                    if "@" in email:
-                        domain = email.rsplit("@", 1)[1].strip().lower()
-                    else:
-                        domain = None
-
-                    should_filter = False
-
-                    if domain:
-                        if mode == "include" and domain not in allowed_domains:
-                            should_filter = True
-
-                        elif mode == "exclude" and domain in allowed_domains:
-                            should_filter = True
-
-                    if should_filter:
-                        filtered_emails.append(email)
-                    else:
-                        emails.append(email)
-
-            else:
-                emails = all_emails
+            filtered_emails = []
+            emails = all_emails
 
             total = len(emails)
 
@@ -554,12 +625,14 @@ class ValidationWorker(QThread):
                             verify_email,
                             email,
                             self.stop_event,
-                            # self.proxy_config
+                            self.domain_filter_config
                         ): email
                         for email in emails
                     }
 
                     pending = set(futures)
+
+                    filtered_count = 0
 
                     while pending:
 
@@ -605,7 +678,12 @@ class ValidationWorker(QThread):
 
                                 self.log.emit(f"Error checking {email}: {exc}")
 
-                            if result["status"] == "VALID":
+                            if result["status"] == "FILTERED":
+                                filtered_writer.writerow(result)
+                                filtered_count += 1
+                                filtered_file.flush()
+
+                            elif result["status"] == "VALID":
                                 valid_writer.writerow(result)
                                 valid_count += 1
                                 valid_file.flush()
@@ -1009,7 +1087,7 @@ class EmailValidatorWindow(QMainWindow):
         )
         settings_layout.addWidget(self.workers_spin)
         self.domain_filter_button = QPushButton(
-            "Domain Filter"
+            ""
         )
         self.domain_filter_button.setIcon(
             qta.icon("fa5s.filter", color="#ffffff")
@@ -1368,16 +1446,26 @@ class EmailValidatorWindow(QMainWindow):
         if dialog.exec_() == QDialog.Accepted:
             self.domain_filter_config = dialog.filter_config
 
-            if self.domain_filter_config["enabled"]:
-                self.domain_filter_button.setText(
-                    "⚙ Domain Filter (ON)"
-                )
-                self.append_log("Domain filtering enabled.")
+            domain_enabled = self.domain_filter_config.get(
+                "enabled", False
+            )
+
+            syntax_enabled = self.domain_filter_config.get(
+                "syntax_enabled", False
+            )
+
+            if domain_enabled or syntax_enabled:
+                self.domain_filter_button.setText("(ON)")
             else:
-                self.domain_filter_button.setText(
-                    "⚙ Domain Filter"
-                )
-                self.append_log("Domain filtering disabled.")
+                self.domain_filter_button.setText("")
+
+            self.append_log(
+                f"Domain filtering: {'ON' if domain_enabled else 'OFF'}"
+            )
+
+            self.append_log(
+                f"Syntax filtering: {'ON' if syntax_enabled else 'OFF'}"
+            )
 
 def main():
     app = QApplication(sys.argv)
