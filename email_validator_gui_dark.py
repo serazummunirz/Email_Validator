@@ -1209,8 +1209,8 @@ class EmailValidatorWindow(QMainWindow):
         }
         self.setWindowIcon(create_app_icon())
         self.setWindowTitle("CPA Email Validator")
-        self.resize(1100, 1100)
-        self.setMinimumSize(1100, 1100)       
+        self.resize(1100, 950)
+        self.setMinimumSize(1100, 850)
 
         self.worker = None
         self.input_path = ""
@@ -1244,7 +1244,7 @@ class EmailValidatorWindow(QMainWindow):
             }
             QGroupBox {
                 margin-top: 12px;
-                padding: 16px 14px 12px 14px;
+                padding: 10px 12px 8px 12px;
                 font-weight: 700;
                 color: #dce7f3;
             }
@@ -1258,7 +1258,7 @@ class EmailValidatorWindow(QMainWindow):
                 background: #0b1422;
                 border: 1px solid #2b3c52;
                 border-radius: 8px;
-                padding: 10px 11px;
+                padding: 6px 9px;
                 color: #e8f0f8;
                 selection-background-color: #147b68;
             }
@@ -1267,7 +1267,7 @@ class EmailValidatorWindow(QMainWindow):
                 background: #1b2a3e;
                 border: 1px solid #344961;
                 border-radius: 8px;
-                padding: 9px 15px;
+                padding: 6px 12px;
                 color: #e5edf7;
                 font-weight: 650;
             }
@@ -1277,7 +1277,7 @@ class EmailValidatorWindow(QMainWindow):
                 background: #087f68;
                 border: 1px solid #10977d;
                 color: white;
-                padding: 11px 20px;
+                padding: 8px 16px;
                 font-size: 10.5pt;
             }
             QPushButton#primaryButton:hover { background: #0a967b; }
@@ -1317,8 +1317,8 @@ class EmailValidatorWindow(QMainWindow):
         root = QWidget()
         self.setCentralWidget(root)
         main_layout = QVBoxLayout(root)
-        main_layout.setContentsMargins(28, 24, 28, 22)
-        main_layout.setSpacing(16)
+        main_layout.setContentsMargins(20, 16, 20, 14)
+        main_layout.setSpacing(10)
 
         # Header
         header = QHBoxLayout()
@@ -1347,12 +1347,12 @@ class EmailValidatorWindow(QMainWindow):
 
         # File selection panel
         files_group = QGroupBox("INPUT & OUTPUT")
-        files_group.setMinimumHeight(160)
+        files_group.setMinimumHeight(125)
 
         files_grid = QGridLayout(files_group)
-        files_grid.setContentsMargins(15, 25, 15, 15)
+        files_grid.setContentsMargins(12, 20, 12, 10)
         files_grid.setHorizontalSpacing(12)
-        files_grid.setVerticalSpacing(14)
+        files_grid.setVerticalSpacing(8)
 
         # Source file
         self.input_edit = QLineEdit()
@@ -1360,10 +1360,10 @@ class EmailValidatorWindow(QMainWindow):
             "Choose a .txt file or CSV with an 'email' column"
         )
         self.input_edit.setReadOnly(True)
-        self.input_edit.setMinimumHeight(42)
+        self.input_edit.setMinimumHeight(34)
 
         browse_input = QPushButton("Browse…")
-        browse_input.setMinimumHeight(42)
+        browse_input.setMinimumHeight(34)
         browse_input.clicked.connect(self.choose_input)
 
         # Output folder
@@ -1372,10 +1372,10 @@ class EmailValidatorWindow(QMainWindow):
             "Choose where result CSV files will be saved"
         )
         self.output_edit.setReadOnly(True)
-        self.output_edit.setMinimumHeight(42)
+        self.output_edit.setMinimumHeight(34)
 
         browse_output = QPushButton("Browse…")
-        browse_output.setMinimumHeight(42)
+        browse_output.setMinimumHeight(34)
         browse_output.clicked.connect(self.choose_output)
 
         # Add widgets to grid
@@ -1476,8 +1476,8 @@ class EmailValidatorWindow(QMainWindow):
         progress_panel = QFrame()
         progress_panel.setObjectName("panel")
         progress_layout = QVBoxLayout(progress_panel)
-        progress_layout.setContentsMargins(17, 14, 17, 15)
-        progress_layout.setSpacing(10)
+        progress_layout.setContentsMargins(14, 9, 14, 9)
+        progress_layout.setSpacing(6)
         progress_top = QHBoxLayout()
         progress_heading = QLabel("VALIDATION PROGRESS:")
         progress_heading.setObjectName("sectionTitle")
@@ -1548,8 +1548,8 @@ class EmailValidatorWindow(QMainWindow):
         card = QFrame()
         card.setObjectName("panel")
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(15, 12, 15, 12)
-        card_layout.setSpacing(5)
+        card_layout.setContentsMargins(12, 7, 12, 7)
+        card_layout.setSpacing(3)
         label = QLabel(title)
         label.setStyleSheet(f"color:{accent}; font-size:9pt; font-weight:750; letter-spacing:1px;")
         number = QLabel(value)
