@@ -14,16 +14,19 @@ import dns.resolver
 import dns.exception
 import dns.name
 
-from PyQt5.QtCore import QThread, pyqtSignal, Qt
+from PyQt5.QtCore import QThread, pyqtSignal, Qt, QSize
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QLineEdit,
     QPushButton, QFileDialog, QSpinBox, QProgressBar, QTextEdit,
     QVBoxLayout, QHBoxLayout, QFormLayout, QGroupBox, QMessageBox,
-    QFrame, QGridLayout, QDialog, QComboBox, QDialogButtonBox, QCheckBox
+    QFrame, QGridLayout, QDialog, QComboBox, QDialogButtonBox, QCheckBox,
+    QPlainTextEdit, QStyle
 )
 from PyQt5.QtGui import (
     QIcon, QPixmap, QPainter, QColor, QPen, QBrush
 )
+
+import qtawesome as qta
 
 # -------------------- CONFIGURATION --------------------
 
@@ -291,6 +294,146 @@ def load_emails(filename):
 
 # -------------------- BACKGROUND WORKER --------------------
 
+
+class DomainFilterDialog(QDialog):
+    def __init__(self, config=None, parent=None):
+        super().__init__(parent)
+
+        config = config or {}
+
+        self.setWindowTitle("Email Domain Filter")
+        self.setMinimumWidth(460)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(14)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        # Domain filtering checkbox
+        self.enabled_checkbox = QCheckBox(
+            "Enable domain filtering"
+        )
+
+        self.enabled_checkbox.setChecked(
+            config.get("enabled", False)
+        )
+
+        self.enabled_checkbox.setMinimumHeight(48)
+        self.enabled_checkbox.setCursor(Qt.PointingHandCursor)
+
+        self.enabled_checkbox.setStyleSheet("""
+            QCheckBox {
+                color: #d8e4df;
+                spacing: 9px;
+                font-size: 13px;
+                font-weight: 500;
+                padding: 4px 0;
+            }
+
+            QCheckBox::indicator {
+                width: 17px;
+                height: 17px;
+                border: 1px solid #66877b;
+                border-radius: 4px;
+                background-color: #252b2a;
+            }
+
+            QCheckBox::indicator:hover {
+                border: 1px solid #17a37a;
+            }
+
+            QCheckBox::indicator:checked {
+                background-color: #176b57;
+                border: 1px solid #21866c;
+            }
+        """)
+
+        layout.addWidget(self.enabled_checkbox)
+
+        layout.addWidget(QLabel("Filter mode"))
+
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem(
+            "Include only these domains", "include"
+        )
+        self.mode_combo.addItem(
+            "Exclude these domains", "exclude"
+        )
+
+        index = self.mode_combo.findData(
+            config.get("mode", "include")
+        )
+        self.mode_combo.setCurrentIndex(max(0, index))
+
+        layout.addWidget(self.mode_combo)
+
+        layout.addWidget(
+            QLabel("Email domains (one per line)")
+        )
+
+        self.domains_edit = QPlainTextEdit()
+        self.domains_edit.setPlaceholderText(
+            "gmail.com\n"
+            "googlemail.com\n"
+            "outlook.com\n"
+            "hotmail.com\n"
+            "yahoo.com\n"
+            "ymail.com"
+        )
+
+        self.domains_edit.setPlainText(
+            "\n".join(config.get("domains", []))
+        )
+
+        self.domains_edit.setMinimumHeight(180)
+        layout.addWidget(self.domains_edit)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Save |
+            QDialogButtonBox.Cancel
+        )
+
+        buttons.accepted.connect(self.save_settings)
+        buttons.rejected.connect(self.reject)
+
+        layout.addWidget(buttons)
+
+        self.filter_config = config.copy()
+
+    def save_settings(self):
+        domains = []
+
+        for line in self.domains_edit.toPlainText().splitlines():
+            domain = line.strip().lower().lstrip("@").rstrip(".")
+
+            if domain and domain not in domains:
+                domains.append(domain)
+
+        if self.enabled_checkbox.isChecked() and not domains:
+            QMessageBox.warning(
+                self,
+                "Domain Filter",
+                "Please enter at least one domain."
+            )
+            return
+
+        for domain in domains:
+            if "@" in domain or any(c.isspace() for c in domain):
+                QMessageBox.warning(
+                    self,
+                    "Invalid Domain",
+                    f"Invalid domain entry: {domain}"
+                )
+                return
+
+        self.filter_config = {
+            "enabled": self.enabled_checkbox.isChecked(),
+            "mode": self.mode_combo.currentData(),
+            "domains": domains,
+        }
+
+        self.accept()
+
+
 class ValidationWorker(QThread):
     progress = pyqtSignal(int, int, str, str)
     counts_updated = pyqtSignal(int, int, int)
@@ -298,12 +441,17 @@ class ValidationWorker(QThread):
     finished_summary = pyqtSignal(int, int, int, bool)
     failed = pyqtSignal(str)
 
-    def __init__(self, input_path, output_dir, max_workers):
+    def __init__(self, input_path, output_dir, max_workers, domain_filter_config=None):
         super().__init__()
         self.input_path = input_path
         # self.input_path.setMinimumHeight(38)
         self.output_dir = output_dir
         self.max_workers = max_workers
+        self.domain_filter_config = domain_filter_config or {
+            "enabled": False,
+            "mode": "include",
+            "domains": [],
+        }
         self.stop_event = threading.Event()
         self.pause_event = threading.Event()
         self.pause_event.set()  # Initially running
@@ -313,16 +461,52 @@ class ValidationWorker(QThread):
 
     def run(self):
         try:
-            emails = load_emails(self.input_path)
-            total = len(emails)
+            all_emails = load_emails(self.input_path)
 
-            if total == 0:
-                self.failed.emit("No email addresses were found in the input file.")
+            if not all_emails:
+                self.failed.emit(
+                    "No email addresses were found in the input file."
+                )
                 return
+
+            filtered_emails = []
+            emails = []
+
+            config = self.domain_filter_config
+
+            if config["enabled"]:
+                allowed_domains = set(config["domains"])
+                mode = config["mode"]
+
+                for email in all_emails:
+                    if "@" in email:
+                        domain = email.rsplit("@", 1)[1].strip().lower()
+                    else:
+                        domain = None
+
+                    should_filter = False
+
+                    if domain:
+                        if mode == "include" and domain not in allowed_domains:
+                            should_filter = True
+
+                        elif mode == "exclude" and domain in allowed_domains:
+                            should_filter = True
+
+                    if should_filter:
+                        filtered_emails.append(email)
+                    else:
+                        emails.append(email)
+
+            else:
+                emails = all_emails
+
+            total = len(emails)
 
             valid_path = f"{self.output_dir}/{VALID_OUTPUT}"
             invalid_path = f"{self.output_dir}/{INVALID_OUTPUT}"
             unknown_path = f"{self.output_dir}/{UNKNOWN_OUTPUT}"
+            filtered_path = f"{self.output_dir}/filtered_emails.csv"
 
             valid_count = 0
             invalid_count = 0
@@ -334,14 +518,34 @@ class ValidationWorker(QThread):
 
             with open(valid_path, "w", newline="", encoding="utf-8") as valid_file, \
                  open(invalid_path, "w", newline="", encoding="utf-8") as invalid_file, \
-                 open(unknown_path, "w", newline="", encoding="utf-8") as unknown_file:
+                 open(unknown_path, "w", newline="", encoding="utf-8") as unknown_file, \
+                 open(filtered_path, "w", newline="", encoding="utf-8") as filtered_file:
 
                 valid_writer = csv.DictWriter(valid_file, fieldnames=FIELDS)
                 invalid_writer = csv.DictWriter(invalid_file, fieldnames=FIELDS)
                 unknown_writer = csv.DictWriter(unknown_file, fieldnames=FIELDS)
+                filtered_writer = csv.DictWriter(
+                    filtered_file,
+                    fieldnames=FIELDS
+                )
                 valid_writer.writeheader()
                 invalid_writer.writeheader()
                 unknown_writer.writeheader()
+                filtered_writer.writeheader()
+
+                # Save filtered emails immediately
+                for email in filtered_emails:
+                    row = {field: "" for field in FIELDS}
+                    row["email"] = email
+                    row["status"] = "FILTERED"
+
+                    filtered_writer.writerow(row)
+
+                filtered_file.flush()
+
+                self.log.emit(f"Loaded {len(all_emails):,} unique email addresses.")
+                self.log.emit(f"Filtered out {len(filtered_emails):,} email addresses.")
+                self.log.emit(f"Remaining for validation: {total:,}")
 
                 with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
 
@@ -589,6 +793,20 @@ def create_app_icon():
 class EmailValidatorWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.domain_filter_config = {
+            "enabled": False,
+            "mode": "include",
+            "domains": [
+                "gmail.com",
+                "googlemail.com",
+                "outlook.com",
+                "hotmail.com",
+                "hotmail.co.uk",
+                "live.com",
+                "yahoo.com",
+                "ymail.com",
+            ],
+        }
         self.setWindowIcon(create_app_icon())
         self.setWindowTitle("CPA Email Validator")
         self.resize(1100, 900)
@@ -790,7 +1008,22 @@ class EmailValidatorWindow(QMainWindow):
             "Keep concurrency modest. High SMTP concurrency can trigger recipient-server throttling."
         )
         settings_layout.addWidget(self.workers_spin)
-        
+        self.domain_filter_button = QPushButton(
+            "Domain Filter"
+        )
+        self.domain_filter_button.setIcon(
+            qta.icon("fa5s.filter", color="#ffffff")
+        )
+        self.domain_filter_button.setIconSize(QSize(22, 22))
+
+        self.domain_filter_button.clicked.connect(
+            self.open_domain_filter
+        )
+
+        # settings_layout.addWidget(self.domain_filter_button)
+        settings_layout.addStretch(8)
+        settings_layout.addWidget(self.domain_filter_button, 0, Qt.AlignRight)
+
         settings_layout.addStretch(1)
         controls.addWidget(settings_group, 1)
 
@@ -800,11 +1033,6 @@ class EmailValidatorWindow(QMainWindow):
         self.start_button = QPushButton("▶  Start validation")
         self.start_button.setObjectName("primaryButton")
         self.start_button.clicked.connect(self.handle_start_pause)
-
-        # self.pause_button = QPushButton("⏸ Pause")
-        # self.pause_button.setEnabled(False)
-        # self.pause_button.clicked.connect(self.toggle_pause)
-        # settings_layout.addWidget(self.pause_button)
 
         self.stop_button = QPushButton("■  Stop")
         self.stop_button.setObjectName("stopButton")
@@ -995,6 +1223,7 @@ class EmailValidatorWindow(QMainWindow):
             self.input_path,
             self.output_dir,
             self.workers_spin.value(),
+            self.domain_filter_config
         )
         self.worker.progress.connect(self.on_progress)
         self.worker.counts_updated.connect(self.on_counts_updated)
@@ -1130,6 +1359,25 @@ class EmailValidatorWindow(QMainWindow):
 
         self.toggle_pause()
 
+    def open_domain_filter(self):
+        dialog = DomainFilterDialog(
+            self.domain_filter_config,
+            self
+        )
+
+        if dialog.exec_() == QDialog.Accepted:
+            self.domain_filter_config = dialog.filter_config
+
+            if self.domain_filter_config["enabled"]:
+                self.domain_filter_button.setText(
+                    "⚙ Domain Filter (ON)"
+                )
+                self.append_log("Domain filtering enabled.")
+            else:
+                self.domain_filter_button.setText(
+                    "⚙ Domain Filter"
+                )
+                self.append_log("Domain filtering disabled.")
 
 def main():
     app = QApplication(sys.argv)
