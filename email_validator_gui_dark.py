@@ -656,6 +656,20 @@ class DomainFilterDialog(QDialog):
         )
 
         self.domains_edit = QPlainTextEdit()
+        self.domains_edit.setStyleSheet("""
+            QPlainTextEdit {
+                background-color: #0b1422;
+                color: #e8f0f8;
+                border: 1px solid #2b3c52;
+                border-radius: 8px;
+                padding: 7px;
+                selection-background-color: #176b57;
+            }
+
+            QPlainTextEdit:focus {
+                border: 1px solid #35b99a;
+            }
+        """)
         self.domains_edit.setPlaceholderText(
             "gmail.com\n"
             "googlemail.com\n"
