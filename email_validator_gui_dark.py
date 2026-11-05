@@ -9,12 +9,13 @@ import socks
 import smtplib
 import threading
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+import requests
 
 import dns.resolver
 import dns.exception
 import dns.name
 
-from PyQt5.QtCore import QThread, pyqtSignal, Qt, QSize
+from PyQt5.QtCore import QThread, pyqtSignal, Qt, QSize, QUrl
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QLineEdit,
     QPushButton, QFileDialog, QSpinBox, QProgressBar, QTextEdit,
@@ -23,10 +24,16 @@ from PyQt5.QtWidgets import (
     QPlainTextEdit, QStyle
 )
 from PyQt5.QtGui import (
-    QIcon, QPixmap, QPainter, QColor, QPen, QBrush
+    QIcon, QPixmap, QPainter, QColor, QPen, QBrush, QDesktopServices
 )
 
 import qtawesome as qta
+from openpyxl import load_workbook
+
+import os
+from contextlib import ExitStack
+from openpyxl import Workbook
+
 
 # -------------------- CONFIGURATION --------------------
 
@@ -323,11 +330,20 @@ def verify_email(email, stop_event=None, domain_filter_config=None):
 
 # -------------------- INPUT LOADING --------------------
 
+
 def load_emails(filename):
-    emails = []
+    records = []
+
+    # --------------------------------------------------
+    # CSV INPUT
+    # --------------------------------------------------
 
     if filename.lower().endswith(".csv"):
-        with open(filename, "r", encoding="utf-8-sig", newline="") as file:
+
+        with open(
+            filename, "r", encoding="utf-8-sig", newline=""
+        ) as file:
+
             reader = csv.DictReader(file)
 
             if not reader.fieldnames:
@@ -342,30 +358,212 @@ def load_emails(filename):
             )
 
             if not email_column:
-                raise ValueError("CSV must contain a column named 'email'.")
+                raise ValueError(
+                    "CSV must contain a column named 'email'."
+                )
 
             for row in reader:
                 value = row.get(email_column)
-                if value and value.strip():
-                    emails.append(value.strip())
-    else:
-        with open(filename, "r", encoding="utf-8-sig") as file:
-            emails = [line.strip() for line in file if line.strip()]
 
-    # Deduplicate case-insensitively while preserving input order.
+                if value and str(value).strip():
+                    row = {
+                        ("email" if col and col.strip().lower() == "email" else col): val
+                        for col, val in row.items()
+                    }
+
+                    row["email"] = str(value).strip()
+                    records.append(row)
+
+    # --------------------------------------------------
+    # EXCEL INPUT
+    # --------------------------------------------------
+
+    elif filename.lower().endswith(".xlsx"):
+
+        workbook = load_workbook(
+            filename,
+            read_only=True,
+            data_only=True
+        )
+
+        try:
+            sheet = workbook.active
+            rows = sheet.iter_rows(values_only=True)
+
+            headers = next(rows, None)
+
+            if not headers:
+                return []
+
+            headers = [
+                (
+                    "email"
+                    if header is not None and str(header).strip().lower() == "email"
+                    else str(header).strip() if header is not None else ""
+                )
+                for header in headers
+            ]
+
+            email_index = next(
+                (
+                    index for index, header in enumerate(headers)
+                    if header.lower() == "email"
+                ),
+                None,
+            )
+
+            if email_index is None:
+                raise ValueError(
+                    "Excel must contain a column named 'email'."
+                )
+
+            for values in rows:
+
+                row = {
+                    headers[i]: values[i] if i < len(values) else None
+                    for i in range(len(headers))
+                    if headers[i]
+                }
+
+                value = values[email_index] if email_index < len(values) else None
+
+                if value is not None and str(value).strip():
+                    row["email"] = str(value).strip()
+                    records.append(row)
+
+        finally:
+            workbook.close()
+
+    # --------------------------------------------------
+    # TXT INPUT
+    # --------------------------------------------------
+
+    elif filename.lower().endswith(".txt"):
+
+        with open(filename, "r", encoding="utf-8-sig") as file:
+
+            for line in file:
+                email = line.strip()
+
+                if email:
+                    records.append({
+                        "email": email
+                    })
+
+    else:
+        raise ValueError(
+            "Unsupported file format. Use TXT, CSV, or XLSX."
+        )
+
+    # --------------------------------------------------
+    # DEDUPLICATION
+    # --------------------------------------------------
+
     seen = set()
-    unique = []
-    for email in emails:
-        key = email.strip().lower()
+    unique_records = []
+
+    for row in records:
+
+        email = row["email"].strip()
+        key = email.lower()
+
         if key and key not in seen:
             seen.add(key)
-            unique.append(email.strip())
+            unique_records.append(row)
 
-    return unique
+    return unique_records
 
 
 # -------------------- BACKGROUND WORKER --------------------
 
+
+class AdBanner(QFrame):
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        self.setObjectName("adBanner")
+        self.setFixedHeight(105)
+
+        self.setStyleSheet("""
+            QFrame#adBanner {
+                background-color: #202a32;
+                border: 1px solid #34434d;
+                border-radius: 8px;
+            }
+
+            QLabel {
+                background: transparent;
+                border: none;
+            }
+
+            QPushButton {
+                background-color: rgb(23, 107, 87);
+                color: white;
+                border: none;
+                border-radius: 5px;
+                padding: 8px 16px;
+                font-weight: bold;
+            }
+
+            QPushButton:hover {
+                background-color: rgb(30, 130, 105);
+            }
+        """)
+
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(16, 10, 16, 10)
+
+        text_layout = QVBoxLayout()
+
+        self.ad_label = QLabel("ADVERTISEMENT")
+        self.ad_label.setStyleSheet(
+            "color: #8fa3ad; font-size: 9px; font-weight: bold;"
+        )
+
+        self.title_label = QLabel()
+        self.title_label.setStyleSheet(
+            "color: white; font-size: 15px; font-weight: bold;"
+        )
+
+        self.description_label = QLabel()
+        self.description_label.setStyleSheet(
+            "color: #c1cdd3; font-size: 11px;"
+        )
+
+        text_layout.addWidget(self.ad_label)
+        text_layout.addWidget(self.title_label)
+        text_layout.addWidget(self.description_label)
+
+        self.ad_button = QPushButton("Learn More")
+        self.ad_button.clicked.connect(self.open_ad)
+
+        main_layout.addLayout(text_layout, 1)
+        main_layout.addWidget(self.ad_button)
+
+        self.ad_url = ""
+
+        self.hide()
+
+    def set_ad(self, ad_type, title, description, button_text, url):
+
+        if ad_type == "own":
+            self.ad_label.setText("FROM SERAZUM")
+        else:
+            self.ad_label.setText("SPONSORED ADVERTISEMENT")
+
+        self.title_label.setText(title)
+        self.description_label.setText(description)
+        self.ad_button.setText(button_text)
+
+        self.ad_url = url
+
+        self.show()
+
+    def open_ad(self):
+
+        if self.ad_url:
+            QDesktopServices.openUrl(QUrl(self.ad_url))
 
 
 class DomainFilterDialog(QDialog):
@@ -554,6 +752,7 @@ class ValidationWorker(QThread):
     def stop(self):
         self.stop_event.set()
 
+
     def run(self):
         try:
             all_emails = load_emails(self.input_path)
@@ -564,84 +763,163 @@ class ValidationWorker(QThread):
                 )
                 return
 
-            filtered_emails = []
-            emails = []
-
-            config = self.domain_filter_config
-
-            filtered_emails = []
             emails = all_emails
-
             total = len(emails)
 
-            valid_path = f"{self.output_dir}/{VALID_OUTPUT}"
-            invalid_path = f"{self.output_dir}/{INVALID_OUTPUT}"
-            unknown_path = f"{self.output_dir}/{UNKNOWN_OUTPUT}"
-            filtered_path = f"{self.output_dir}/filtered_emails.csv"
+            # --------------------------------------------------
+            # DYNAMIC OUTPUT COLUMNS
+            # --------------------------------------------------
+
+            original_fields = []
+
+            for record in all_emails:
+                for field in record:
+                    if field not in original_fields:
+                        original_fields.append(field)
+
+            result_fields = [
+                "syntax",
+                "mx",
+                "smtp",
+                "catch_all",
+                "filter_status",
+                "status",
+            ]
+
+            output_fields = original_fields.copy()
+
+            for field in result_fields:
+                if field not in output_fields:
+                    output_fields.append(field)
+
+            # --------------------------------------------------
+            # OUTPUT FILE NAMES
+            # --------------------------------------------------
+
+            output_bases = {
+                "valid": os.path.splitext(VALID_OUTPUT)[0],
+                "invalid": os.path.splitext(INVALID_OUTPUT)[0],
+                "unknown": os.path.splitext(UNKNOWN_OUTPUT)[0],
+                "filtered": "filtered_emails",
+            }
+
+            csv_paths = {
+                key: os.path.join(
+                    self.output_dir, f"{name}.csv"
+                )
+                for key, name in output_bases.items()
+            }
+
+            xlsx_paths = {
+                key: os.path.join(
+                    self.output_dir, f"{name}.xlsx"
+                )
+                for key, name in output_bases.items()
+            }
+
+            # --------------------------------------------------
+            # COUNTERS
+            # --------------------------------------------------
 
             valid_count = 0
             invalid_count = 0
             unknown_count = 0
+            filtered_count = 0
             completed = 0
 
-            self.log.emit(f"Loaded {total:,} unique email addresses.")
-            self.log.emit(f"Starting {self.max_workers} worker threads.")
+            self.log.emit(
+                f"Loaded {total:,} unique email addresses."
+            )
 
-            with open(valid_path, "w", newline="", encoding="utf-8") as valid_file, \
-                 open(invalid_path, "w", newline="", encoding="utf-8") as invalid_file, \
-                 open(unknown_path, "w", newline="", encoding="utf-8") as unknown_file, \
-                 open(filtered_path, "w", newline="", encoding="utf-8") as filtered_file:
+            self.log.emit(
+                f"Starting {self.max_workers} worker threads."
+            )
 
-                valid_writer = csv.DictWriter(valid_file, fieldnames=FIELDS)
-                invalid_writer = csv.DictWriter(invalid_file, fieldnames=FIELDS)
-                unknown_writer = csv.DictWriter(unknown_file, fieldnames=FIELDS)
-                filtered_writer = csv.DictWriter(
-                    filtered_file,
-                    fieldnames=FIELDS
-                )
-                valid_writer.writeheader()
-                invalid_writer.writeheader()
-                unknown_writer.writeheader()
-                filtered_writer.writeheader()
+            # --------------------------------------------------
+            # CREATE CSV AND EXCEL OUTPUTS
+            # --------------------------------------------------
 
-                # Save filtered emails immediately
-                for email in filtered_emails:
-                    row = {field: "" for field in FIELDS}
-                    row["email"] = email
-                    row["status"] = "FILTERED"
+            with ExitStack() as stack:
 
-                    filtered_writer.writerow(row)
+                csv_files = {}
+                csv_writers = {}
 
-                filtered_file.flush()
+                workbooks = {}
+                worksheets = {}
 
-                self.log.emit(f"Loaded {len(all_emails):,} unique email addresses.")
-                self.log.emit(f"Filtered out {len(filtered_emails):,} email addresses.")
-                self.log.emit(f"Remaining for validation: {total:,}")
+                for key in output_bases:
 
-                with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                    # CSV
+                    csv_file = stack.enter_context(
+                        open(
+                            csv_paths[key],
+                            "w",
+                            newline="",
+                            encoding="utf-8-sig"
+                        )
+                    )
+
+                    writer = csv.DictWriter(
+                        csv_file,
+                        fieldnames=output_fields,
+                        extrasaction="ignore"
+                    )
+
+                    writer.writeheader()
+
+                    csv_files[key] = csv_file
+                    csv_writers[key] = writer
+
+                    # XLSX
+                    workbook = Workbook(write_only=True)
+                    worksheet = workbook.create_sheet("Results")
+
+                    worksheet.append(output_fields)
+
+                    workbooks[key] = workbook
+                    worksheets[key] = worksheet
+
+                # --------------------------------------------------
+                # RESULT WRITER
+                # --------------------------------------------------
+
+                def write_result(category, row):
+
+                    csv_writers[category].writerow(row)
+                    csv_files[category].flush()
+
+                    worksheets[category].append([
+                        row.get(field)
+                        for field in output_fields
+                    ])
+
+                # --------------------------------------------------
+                # VALIDATION WORKERS
+                # --------------------------------------------------
+
+                with ThreadPoolExecutor(
+                    max_workers=self.max_workers
+                ) as executor:
 
                     futures = {
                         executor.submit(
                             verify_email,
-                            email,
+                            record["email"],
                             self.stop_event,
                             self.domain_filter_config
-                        ): email
-                        for email in emails
+                        ): record
+                        for record in emails
                     }
 
                     pending = set(futures)
 
-                    filtered_count = 0
-
                     while pending:
 
-                        # Cancel tasks that haven't started when Stop is requested
+                        # Cancel tasks that haven't started
                         if self.stop_event.is_set():
                             for future in pending:
                                 future.cancel()
 
-                        # Wait briefly so Stop can be detected promptly
                         done, pending = wait(
                             pending,
                             timeout=0.2,
@@ -650,53 +928,73 @@ class ValidationWorker(QThread):
 
                         for future in done:
 
-                            # Ignore tasks successfully cancelled before execution
                             if future.cancelled():
                                 continue
 
-                            # Respect Pause, but allow Stop to release the pause
+                            # Respect Pause
                             while not self.pause_event.is_set():
                                 if self.stop_event.is_set():
                                     break
+
                                 time.sleep(0.2)
 
-                            email = futures[future]
+                            record = futures[future]
+                            email = record["email"]
+
                             completed += 1
 
                             try:
                                 result = future.result()
 
                             except Exception as exc:
+
                                 result = {
                                     "email": email,
                                     "syntax": "UNKNOWN",
                                     "mx": "UNKNOWN",
                                     "smtp": "UNKNOWN",
                                     "catch_all": "UNKNOWN",
+                                    "filter_status": "PASSED",
                                     "status": "UNKNOWN",
                                 }
 
-                                self.log.emit(f"Error checking {email}: {exc}")
+                                self.log.emit(
+                                    f"Error checking {email}: {exc}"
+                                )
+
+                            # Combine original data with verification results
+                            output_row = {
+                                **record,
+                                **result
+                            }
+
+                            # --------------------------------------------------
+                            # SAVE RESULT
+                            # --------------------------------------------------
 
                             if result["status"] == "FILTERED":
-                                filtered_writer.writerow(result)
+
+                                write_result("filtered", output_row)
                                 filtered_count += 1
-                                filtered_file.flush()
 
                             elif result["status"] == "VALID":
-                                valid_writer.writerow(result)
+
+                                write_result("valid", output_row)
                                 valid_count += 1
-                                valid_file.flush()
 
                             elif result["status"] == "INVALID":
-                                invalid_writer.writerow(result)
+
+                                write_result("invalid", output_row)
                                 invalid_count += 1
-                                invalid_file.flush()
 
                             else:
-                                unknown_writer.writerow(result)
+
+                                write_result("unknown", output_row)
                                 unknown_count += 1
-                                unknown_file.flush()
+
+                            # --------------------------------------------------
+                            # UPDATE GUI
+                            # --------------------------------------------------
 
                             self.counts_updated.emit(
                                 valid_count,
@@ -711,13 +1009,37 @@ class ValidationWorker(QThread):
                                 result["status"]
                             )
 
+                # --------------------------------------------------
+                # SAVE EXCEL WORKBOOKS
+                # --------------------------------------------------
+
+                for key, workbook in workbooks.items():
+                    workbook.save(xlsx_paths[key])
+
+            # --------------------------------------------------
+            # FINISHED
+            # --------------------------------------------------
+
+            self.log.emit(
+                f"Filtered: {filtered_count:,}"
+            )
+
+            self.log.emit(
+                "CSV and Excel output files saved successfully."
+            )
+
             stopped = self.stop_event.is_set()
+
             self.finished_summary.emit(
-                valid_count, invalid_count, unknown_count, stopped
+                valid_count,
+                invalid_count,
+                unknown_count,
+                stopped
             )
 
         except Exception as exc:
             self.failed.emit(str(exc))
+
 
     def toggle_pause(self):
         if self.pause_event.is_set():
@@ -887,9 +1209,8 @@ class EmailValidatorWindow(QMainWindow):
         }
         self.setWindowIcon(create_app_icon())
         self.setWindowTitle("CPA Email Validator")
-        self.resize(1100, 900)
-        self.setMinimumSize(1100, 900)
-        
+        self.resize(1100, 1100)
+        self.setMinimumSize(1100, 1100)       
 
         self.worker = None
         self.input_path = ""
@@ -1187,7 +1508,7 @@ class EmailValidatorWindow(QMainWindow):
         # log_hint = QLabel("Live validation events")
         # log_hint.setObjectName("muted")
         log_header.addWidget(log_title)
-        log_header.addSpacing(8)
+        # log_header.addSpacing(8)
         # log_header.addWidget(log_hint)
         log_header.addStretch(1)
         clear_log = QPushButton("Clear log")
@@ -1200,6 +1521,17 @@ class EmailValidatorWindow(QMainWindow):
         self.log_box.setPlaceholderText("Validation activity will appear here…")
         self.log_box.document().setMaximumBlockCount(3000)
         main_layout.addWidget(self.log_box, 1)
+
+        self.ad_banner = AdBanner(self)
+        main_layout.addWidget(self.ad_banner)
+
+        self.ad_banner.set_ad(
+            ad_type="own",
+            title="Professional Email Automation",
+            description="Explore email automation and SMTP solutions from Serazum.",
+            button_text="Explore",
+            url="https://serazum.com"
+        )
 
         note = QLabel(
             "Note: SMTP validation is best-effort and cannot conclusively confirm mailbox existence. "

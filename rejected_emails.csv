@@ -1,6 +1,0 @@
-email,syntax,mx,smtp,catch_all,filter_status,status
-serazummunirz@gmail.co.uk,VALID,INVALID,UNKNOWN,UNKNOWN,PASSED,INVALID
-serazummunirz@port80link.com,VALID,VALID,REJECTED,UNKNOWN,PASSED,INVALID
-serazummunirz@bing.com,VALID,VALID,REJECTED,UNKNOWN,PASSED,INVALID
-serazummunirz@pong.com,VALID,VALID,REJECTED,UNKNOWN,PASSED,INVALID
-serazummunirz@ping.com,VALID,VALID,REJECTED,UNKNOWN,PASSED,INVALID
