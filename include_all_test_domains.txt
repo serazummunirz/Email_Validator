@@ -1,0 +1,7 @@
+gmail.com
+example.com
+example.net
+example.org
+mail.example.test
+sub.example.com
+invalid.test

@@ -10,6 +10,7 @@ import smtplib
 import threading
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import requests
+from urllib.parse import urljoin
 
 import dns.resolver
 import dns.exception
@@ -49,6 +50,9 @@ SENDER_EMAIL = "verify@example.com"
 VALID_OUTPUT = "verified_emails.csv"
 INVALID_OUTPUT = "rejected_emails.csv"
 UNKNOWN_OUTPUT = "unknown_emails.csv"
+
+# AD
+API_BASE_URL = "http://127.0.0.1:8010"
 
 FIELDS = [
     "email",
@@ -135,8 +139,9 @@ def random_email(domain):
     return f"{username}@{domain}"
 
 
-def smtp_check(email, mx_records, stop_event=None, proxy=None):
-    """Best-effort SMTP recipient test with optional proxy support."""
+
+def smtp_check(email, mx_records, stop_event=None):
+    """Best-effort SMTP recipient test without proxy support."""
 
     for mx in mx_records:
         if stop_event and stop_event.is_set():
@@ -145,44 +150,51 @@ def smtp_check(email, mx_records, stop_event=None, proxy=None):
         server = None
 
         try:
-            if proxy and proxy.get("enabled"):
-                proxy_type = {
-                    "SOCKS5": socks.SOCKS5,
-                    "SOCKS4": socks.SOCKS4,
-                    "HTTP": socks.HTTP,
-                }[proxy["type"]]
+            server = smtplib.SMTP(timeout=SMTP_TIMEOUT)
 
-                proxy_socket = socks.socksocket()
-                proxy_socket.set_proxy(
-                    proxy_type,
-                    proxy["host"],
-                    int(proxy["port"]),
-                    username=proxy.get("username") or None,
-                    password=proxy.get("password") or None,
-                )
-                proxy_socket.settimeout(SMTP_TIMEOUT)
-                proxy_socket.connect((mx, 25))
+            code, _ = server.connect(mx, 25)
 
-                server = smtplib.SMTP(timeout=SMTP_TIMEOUT)
-                server.connect(mx, 25)
-                server.sock.close()
-                server.sock = proxy_socket
-                server.file = None
-
-            else:
-                server = smtplib.SMTP(timeout=SMTP_TIMEOUT)
-                server.connect(mx, 25)
+            if code != 220:
+                continue
 
             server.ehlo()
-            server.mail(SENDER_EMAIL)
 
-            code, _message = server.rcpt(email)
+            mail_code, _ = server.mail(SENDER_EMAIL)
+
+            if mail_code not in (250, 251):
+                continue
+
+            code, message = server.rcpt(email)
+
+            print(
+                f"SMTP DEBUG | Email: {email} | MX: {mx} | "
+                f"Code: {code} | Message: {message!r}"
+            )
 
             if code in (250, 251):
                 return "ACCEPTED"
 
-            if code in (550, 551, 553):
-                return "REJECTED"
+            if code == 550:
+                if isinstance(message, bytes):
+                    message = message.decode("utf-8", errors="ignore")
+
+                message = str(message).lower()
+
+                rejection_indicators = [
+                    "5.1.1",
+                    "user unknown",
+                    "unknown user",
+                    "no such user",
+                    "user does not exist",
+                    "mailbox does not exist",
+                    "mailbox not found",
+                    "recipient not found",
+                    "no such mailbox",
+                    "unknown recipient",
+                ]
+
+                if any(item in message for item in rejection_indicators):
+                    return "REJECTED"
 
             return "UNKNOWN"
 
@@ -205,6 +217,7 @@ def smtp_check(email, mx_records, stop_event=None, proxy=None):
                         pass
 
     return "UNKNOWN"
+
 
 
 def verify_email(email, stop_event=None, domain_filter_config=None):
@@ -232,12 +245,29 @@ def verify_email(email, stop_event=None, domain_filter_config=None):
         result["syntax"] = "VALID"
 
     # Strict syntax filtering
-    if config.get("syntax_enabled", False) and not syntax_valid:
-        result["status"] = "FILTERED"
-        result["filter_status"] = "SYNTAX"
-        return result
+    if config.get("keyword_enabled", False):
 
-    # A usable domain is required for DNS/MX validation.
+        keywords = [
+            keyword.casefold()
+            for keyword in config.get("keywords", [])
+            if keyword.strip()
+        ]
+
+        keyword_matches = any(
+            keyword in email.casefold()
+            for keyword in keywords
+        )
+
+        if keyword_matches:
+            result["status"] = "FILTERED"
+            result["filter_status"] = "KEYWORD"
+            return result
+
+
+    # --------------------------------------------------
+    # EXTRACT DOMAIN
+    # --------------------------------------------------
+
     if "@" not in email:
         result["status"] = "INVALID"
         return result
@@ -247,6 +277,7 @@ def verify_email(email, stop_event=None, domain_filter_config=None):
     if not domain:
         result["status"] = "INVALID"
         return result
+
 
     # --------------------------------------------------
     # 2. DOMAIN FILTER
@@ -566,41 +597,19 @@ class AdBanner(QFrame):
             QDesktopServices.openUrl(QUrl(self.ad_url))
 
 
+
 class DomainFilterDialog(QDialog):
     def __init__(self, config=None, parent=None):
         super().__init__(parent)
 
         config = config or {}
 
-        self.setWindowTitle("Email Domain Filter")
+        self.setWindowTitle("Email Filtering Settings")
         self.setMinimumWidth(460)
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(14)
+        layout.setSpacing(12)
         layout.setContentsMargins(20, 20, 20, 20)
-
-        # Domain filtering checkbox
-        self.enabled_checkbox = QCheckBox(
-            "Enable domain filtering"
-        )
-
-        self.enabled_checkbox.setChecked(
-            config.get("enabled", False)
-        )
-
-        self.enabled_checkbox.setMinimumHeight(48)
-        self.enabled_checkbox.setCursor(Qt.PointingHandCursor)
-
-        # Strict syntax filtering checkbox
-        self.syntax_checkbox = QCheckBox(
-            "Enable strict syntax filtering"
-        )
-
-        self.syntax_checkbox.setChecked(
-            config.get("syntax_enabled", False)
-        )
-
-        self.syntax_checkbox.setCursor(Qt.PointingHandCursor)
 
         checkbox_style = """
             QCheckBox {
@@ -629,12 +638,42 @@ class DomainFilterDialog(QDialog):
             }
         """
 
+        text_edit_style = """
+            QPlainTextEdit {
+                background-color: #0b1422;
+                color: #e8f0f8;
+                border: 1px solid #2b3c52;
+                border-radius: 8px;
+                padding: 7px;
+                selection-background-color: #176b57;
+            }
+
+            QPlainTextEdit:focus {
+                border: 1px solid #35b99a;
+            }
+        """
+
+        # ==============================================
+        # 1. DOMAIN FILTERING
+        # ==============================================
+
+        domain_group = QGroupBox("Domain Filtering")
+        domain_layout = QVBoxLayout(domain_group)
+        domain_layout.setSpacing(8)
+        domain_layout.setContentsMargins(12, 14, 12, 12)
+
+        self.enabled_checkbox = QCheckBox(
+            "Enable domain filtering"
+        )
+        self.enabled_checkbox.setChecked(
+            config.get("enabled", False)
+        )
+        self.enabled_checkbox.setCursor(Qt.PointingHandCursor)
         self.enabled_checkbox.setStyleSheet(checkbox_style)
-        self.syntax_checkbox.setStyleSheet(checkbox_style)
 
-        layout.addWidget(self.enabled_checkbox)
+        domain_layout.addWidget(self.enabled_checkbox)
 
-        layout.addWidget(QLabel("Filter mode"))
+        domain_layout.addWidget(QLabel("Filter mode"))
 
         self.mode_combo = QComboBox()
         self.mode_combo.addItem(
@@ -649,45 +688,77 @@ class DomainFilterDialog(QDialog):
         )
         self.mode_combo.setCurrentIndex(max(0, index))
 
-        layout.addWidget(self.mode_combo)
+        domain_layout.addWidget(self.mode_combo)
 
-        layout.addWidget(
+        domain_layout.addWidget(
             QLabel("Email domains (one per line)")
         )
 
         self.domains_edit = QPlainTextEdit()
-        self.domains_edit.setStyleSheet("""
-            QPlainTextEdit {
-                background-color: #0b1422;
-                color: #e8f0f8;
-                border: 1px solid #2b3c52;
-                border-radius: 8px;
-                padding: 7px;
-                selection-background-color: #176b57;
-            }
-
-            QPlainTextEdit:focus {
-                border: 1px solid #35b99a;
-            }
-        """)
+        self.domains_edit.setStyleSheet(text_edit_style)
         self.domains_edit.setPlaceholderText(
             "gmail.com\n"
             "googlemail.com\n"
             "outlook.com\n"
             "hotmail.com\n"
-            "yahoo.com\n"
-            "ymail.com"
+            "yahoo.com"
         )
 
         self.domains_edit.setPlainText(
             "\n".join(config.get("domains", []))
         )
+        self.domains_edit.setMinimumHeight(110)
 
-        self.domains_edit.setMinimumHeight(180)
-        layout.addWidget(self.domains_edit)
+        domain_layout.addWidget(self.domains_edit)
 
-        # Strict syntax filtering option
-        layout.addWidget(self.syntax_checkbox)
+        layout.addWidget(domain_group)
+
+        # ==============================================
+        # 2. EMAIL KEYWORD FILTERING
+        # ==============================================
+
+        keyword_group = QGroupBox("Email Keyword Filtering")
+        keyword_layout = QVBoxLayout(keyword_group)
+        keyword_layout.setSpacing(8)
+        keyword_layout.setContentsMargins(12, 14, 12, 12)
+
+        self.keyword_checkbox = QCheckBox(
+            "Enable keyword filtering"
+        )
+        self.keyword_checkbox.setChecked(
+            config.get("keyword_enabled", False)
+        )
+        self.keyword_checkbox.setCursor(Qt.PointingHandCursor)
+        self.keyword_checkbox.setStyleSheet(checkbox_style)
+
+        keyword_layout.addWidget(self.keyword_checkbox)
+
+        keyword_layout.addWidget(
+            QLabel("Email keywords (one per line)")
+        )
+
+        self.keywords_edit = QPlainTextEdit()
+        self.keywords_edit.setStyleSheet(text_edit_style)
+        self.keywords_edit.setPlaceholderText(
+            "no-reply\n"
+            "noreply\n"
+            "do-not-reply\n"
+            "mailer-daemon\n"
+            "postmaster"
+        )
+
+        self.keywords_edit.setPlainText(
+            "\n".join(config.get("keywords", []))
+        )
+        self.keywords_edit.setMinimumHeight(110)
+
+        keyword_layout.addWidget(self.keywords_edit)
+
+        layout.addWidget(keyword_group)
+
+        # ==============================================
+        # SAVE / CANCEL
+        # ==============================================
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.Save |
@@ -702,6 +773,8 @@ class DomainFilterDialog(QDialog):
         self.filter_config = config.copy()
 
     def save_settings(self):
+
+        # Collect domains
         domains = []
 
         for line in self.domains_edit.toPlainText().splitlines():
@@ -710,10 +783,20 @@ class DomainFilterDialog(QDialog):
             if domain and domain not in domains:
                 domains.append(domain)
 
+        # Collect keywords
+        keywords = []
+
+        for line in self.keywords_edit.toPlainText().splitlines():
+            keyword = line.strip().casefold()
+
+            if keyword and keyword not in keywords:
+                keywords.append(keyword)
+
+        # Validate domains
         if self.enabled_checkbox.isChecked() and not domains:
             QMessageBox.warning(
                 self,
-                "",
+                "Missing Domains",
                 "Please enter at least one domain."
             )
             return
@@ -727,11 +810,22 @@ class DomainFilterDialog(QDialog):
                 )
                 return
 
+        # Validate keywords
+        if self.keyword_checkbox.isChecked() and not keywords:
+            QMessageBox.warning(
+                self,
+                "Missing Keywords",
+                "Please enter at least one keyword."
+            )
+            return
+
         self.filter_config = {
             "enabled": self.enabled_checkbox.isChecked(),
             "mode": self.mode_combo.currentData(),
             "domains": domains,
-            "syntax_enabled": self.syntax_checkbox.isChecked(),
+
+            "keyword_enabled": self.keyword_checkbox.isChecked(),
+            "keywords": keywords,
         }
 
         self.accept()
@@ -754,7 +848,10 @@ class ValidationWorker(QThread):
             "enabled": False,
             "mode": "include",
             "domains": [],
-            "syntax_enabled": False,
+
+            "keyword_enabled": False,
+            "keyword_mode": "exclude",
+            "keywords": [],
         }
 
         if domain_filter_config is not None:
@@ -1204,6 +1301,46 @@ def create_app_icon():
     return QIcon(pixmap)
 
 
+class AdFetchWorker(QThread):
+    ad_loaded = pyqtSignal(dict)
+
+    def run(self):
+        try:
+            response = requests.get(
+                f"{API_BASE_URL}/api/ads/current",
+                timeout=10
+            )
+            response.raise_for_status()
+
+            data = response.json()
+
+            # Support either a direct ad object or {"ad": {...}}
+            ad = data.get("ad", data)
+
+            if not ad or not ad.get("id"):
+                self.ad_loaded.emit({})
+                return
+
+            # Resolve the tracking URL returned by the API
+            click_url = ad.get("click_url")
+
+            if click_url:
+                ad["click_url"] = urljoin(
+                    API_BASE_URL + "/",
+                    click_url
+                )
+            else:
+                ad["click_url"] = (
+                    f"{API_BASE_URL}/api/ads/{ad['id']}/click"
+                )
+
+            self.ad_loaded.emit(ad)
+
+        except Exception as e:
+            print(f"AD API ERROR: {e}")
+            self.ad_loaded.emit({})
+
+
 class EmailValidatorWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1539,13 +1676,7 @@ class EmailValidatorWindow(QMainWindow):
         self.ad_banner = AdBanner(self)
         main_layout.addWidget(self.ad_banner)
 
-        self.ad_banner.set_ad(
-            ad_type="own",
-            title="Professional Email Automation",
-            description="Explore email automation and SMTP solutions from Serazum.",
-            button_text="Explore",
-            url="https://serazum.com"
-        )
+        self.load_remote_ad()
 
         note = QLabel(
             "Note: SMTP validation is best-effort and cannot conclusively confirm mailbox existence. "
@@ -1796,11 +1927,11 @@ class EmailValidatorWindow(QMainWindow):
                 "enabled", False
             )
 
-            syntax_enabled = self.domain_filter_config.get(
-                "syntax_enabled", False
+            keyword_enabled = self.domain_filter_config.get(
+                "keyword_enabled", False
             )
 
-            if domain_enabled or syntax_enabled:
+            if domain_enabled or keyword_enabled:
                 self.domain_filter_button.setText("(ON)")
             else:
                 self.domain_filter_button.setText("")
@@ -1810,8 +1941,29 @@ class EmailValidatorWindow(QMainWindow):
             )
 
             self.append_log(
-                f"Syntax filtering: {'ON' if syntax_enabled else 'OFF'}"
+                f"Email Keyword filtering: {'ON' if keyword_enabled else 'OFF'}"
             )
+
+    def load_remote_ad(self):
+        self.ad_banner.hide()
+
+        self.ad_worker = AdFetchWorker()
+        self.ad_worker.ad_loaded.connect(self.on_remote_ad_loaded)
+        self.ad_worker.start()
+
+    def on_remote_ad_loaded(self, ad):
+        if not ad:
+            self.ad_banner.hide()
+            return
+
+        self.ad_banner.set_ad(
+            ad_type=ad.get("type", "own"),
+            title=ad.get("title", ""),
+            description=ad.get("description", ""),
+            button_text=ad.get("button_text", "Explore"),
+            url=ad.get("click_url", "")
+        )
+
 
 def main():
     app = QApplication(sys.argv)
